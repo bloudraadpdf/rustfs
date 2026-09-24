@@ -3723,7 +3723,9 @@ impl ECStore {
         if !opts.data_movement {
             return Err(Error::other("data movement PUT requires data_movement options"));
         }
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
         let (object, mut opts) = self.prepare_put_object(bucket, object, opts).await?;
+        prefix_guard.add_to_options(&mut opts);
         ensure_decommission_capacity_mutation_id(bucket, &object, &mut opts);
         let idx = self
             .select_put_object_pool_idx(bucket, object.as_str(), data.size(), &opts)
@@ -4093,8 +4095,10 @@ impl ECStore {
         self: &Arc<Self>,
         bucket: &str,
         object: &str,
-        opts: ObjectOptions,
+        mut opts: ObjectOptions,
     ) -> Result<ObjectInfo> {
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        prefix_guard.add_to_options(&mut opts);
         let result = self
             .handle_delete_object_with_journal(bucket, object, opts, Some(Arc::clone(self)))
             .await;
@@ -4108,8 +4112,17 @@ impl ECStore {
         self: &Arc<Self>,
         bucket: &str,
         objects: Vec<ObjectToDelete>,
-        opts: ObjectOptions,
+        mut opts: ObjectOptions,
     ) -> (Vec<DeletedObject>, Vec<Option<Error>>) {
+        let names: Vec<&str> = objects.iter().map(|object| object.object_name.as_str()).collect();
+        let prefix_guard = match self.admit_prefix_mutations(bucket, &names).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                let count = objects.len();
+                return (vec![DeletedObject::default(); count], vec![Some(error); count]);
+            }
+        };
+        prefix_guard.add_to_options(&mut opts);
         let result = self
             .handle_delete_objects_with_journal(bucket, objects, opts, Some(Arc::clone(self)))
             .await;
@@ -4124,8 +4137,17 @@ impl ECStore {
         self: &Arc<Self>,
         bucket: &str,
         objects: Vec<ObjectToDelete>,
-        opts: ObjectOptions,
+        mut opts: ObjectOptions,
     ) -> (Vec<DeletedObject>, Vec<Option<Error>>, Vec<Option<DeleteAccounting>>) {
+        let names: Vec<&str> = objects.iter().map(|object| object.object_name.as_str()).collect();
+        let prefix_guard = match self.admit_prefix_mutations(bucket, &names).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                let count = objects.len();
+                return (vec![DeletedObject::default(); count], vec![Some(error); count], vec![None; count]);
+            }
+        };
+        prefix_guard.add_to_options(&mut opts);
         let result = self
             .handle_delete_objects_with_journal_and_accounting(bucket, objects, opts, Some(Arc::clone(self)))
             .await;

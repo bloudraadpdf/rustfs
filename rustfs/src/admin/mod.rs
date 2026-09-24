@@ -34,11 +34,11 @@ mod kms_contract;
 mod route_registration_test;
 
 use handlers::{
-    account, audit, batch_job, bucket_meta, cluster_snapshot, config_admin, diagnostics, durability as durability_handler,
-    extensions, heal, health, idp_compat, ilm_transition, inspect_archive, kms, mfa, module_switch, object_data_cache,
-    object_zip_download, oidc, plugins_catalog, plugins_instances, pools, profile_admin, quota as quota_handler, rebalance,
-    replication as replication_handler, scanner, site_replication, sts, system, table_catalog, tier, tls_debug, usage_prefix,
-    user,
+    account, audit, batch_job, bucket_meta, closed_prefix, cluster_snapshot, config_admin, diagnostics,
+    durability as durability_handler, extensions, heal, health, idp_compat, ilm_transition, inspect_archive, kms, mfa,
+    module_switch, object_data_cache, object_zip_download, oidc, plugins_catalog, plugins_instances, pools, profile_admin,
+    quota as quota_handler, rebalance, replication as replication_handler, scanner, site_replication, sts, system, table_catalog,
+    tier, tls_debug, usage_prefix, user,
 };
 use router::{AdminOperation, S3Router};
 use s3s::route::S3Route;
@@ -78,6 +78,7 @@ fn register_admin_routes(r: &mut S3Router<AdminOperation>) -> std::io::Result<()
     quota_handler::register_quota_route(r)?;
     durability_handler::register_durability_route(r)?;
     bucket_meta::register_bucket_meta_route(r)?;
+    closed_prefix::register_closed_prefix_route(r)?;
     config_admin::register_config_route(r)?;
     scanner::register_scanner_route(r)?;
     usage_prefix::register_usage_prefix_route(r)?;

@@ -623,6 +623,7 @@ impl ECStore {
         data: &mut PutObjReader,
         opts: &ObjectOptions,
     ) -> Result<PartInfo> {
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
         let part_id = opts
             .part_number
             .ok_or_else(|| Error::other("targeted multipart upload requires a part number"))?;
@@ -631,6 +632,7 @@ impl ECStore {
             return Err(Error::other("targeted multipart upload requires data_movement options"));
         }
         let (mut opts, _bucket_lifecycle_guard) = self.guard_multipart_bucket_incarnation(bucket, opts).await?;
+        prefix_guard.add_to_options(&mut opts);
         ensure_decommission_capacity_mutation_id(bucket, object, &mut opts);
         let pool = self.pools.get(target_pool_idx).ok_or_else(|| {
             Error::InvalidArgument("data-movement".to_string(), "target-pool".to_string(), target_pool_idx.to_string())
@@ -772,6 +774,7 @@ impl ECStore {
         expected_upload_identity: Option<&str>,
         opts: &ObjectOptions,
     ) -> Result<()> {
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
         check_new_multipart_args(bucket, object)?;
         for upload_id in upload_ids {
             check_abort_multipart_args(bucket, object, upload_id)?;
@@ -780,6 +783,7 @@ impl ECStore {
             return Err(Error::other("targeted multipart abort requires data_movement options"));
         }
         let (mut opts, _bucket_lifecycle_guard) = self.guard_multipart_bucket_incarnation(bucket, opts).await?;
+        prefix_guard.add_to_options(&mut opts);
         ensure_decommission_capacity_mutation_id(bucket, object, &mut opts);
         let pool = self
             .pools
@@ -895,11 +899,13 @@ impl ECStore {
         publication_fence: Option<RemoteTuplePublicationFence>,
     ) -> Result<ObjectInfo> {
         let (target_pool_idx, mutation_fence) = target;
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
         check_complete_multipart_args(bucket, object, upload_id)?;
         if !opts.data_movement {
             return Err(Error::other("targeted multipart completion requires data_movement options"));
         }
         let (mut opts, _bucket_lifecycle_guard) = self.guard_multipart_bucket_incarnation(bucket, opts).await?;
+        prefix_guard.add_to_options(&mut opts);
         ensure_decommission_capacity_mutation_id(bucket, object, &mut opts);
         if opts.overwrites_existing_version() && !is_meta_bucketname(bucket) {
             let expected_incarnation_id = opts

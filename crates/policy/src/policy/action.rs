@@ -401,6 +401,10 @@ pub enum AdminAction {
     ServiceFreezeAdminAction,
     #[strum(serialize = "admin:ConfigUpdate")]
     ConfigUpdateAdminAction,
+    #[strum(serialize = "admin:TokolosheClosePrefix")]
+    TokolosheClosePrefixAction,
+    #[strum(serialize = "admin:TokolosheDeleteClosedObjects")]
+    TokolosheDeleteClosedObjectsAction,
     #[strum(serialize = "admin:CreateUser")]
     CreateUserAdminAction,
     #[strum(serialize = "admin:DeleteUser")]
@@ -591,6 +595,8 @@ impl AdminAction {
                 | AdminAction::ServiceStopAdminAction
                 | AdminAction::ServiceFreezeAdminAction
                 | AdminAction::ConfigUpdateAdminAction
+                | AdminAction::TokolosheClosePrefixAction
+                | AdminAction::TokolosheDeleteClosedObjectsAction
                 | AdminAction::CreateUserAdminAction
                 | AdminAction::DeleteUserAdminAction
                 | AdminAction::ListUsersAdminAction

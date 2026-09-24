@@ -377,7 +377,9 @@ const MAX_UPLOADS_LIST: usize = 10000;
 
 mod bucket;
 mod bucket_fence;
+mod closed_prefix;
 pub(crate) use bucket::await_bucket_namespace_operation;
+pub use closed_prefix::{ClosedPrefixProofV1, ClosedPrefixV1};
 mod heal;
 mod heal_walk;
 pub use heal_walk::HealWalkVersion;
@@ -1193,7 +1195,9 @@ impl ECStore {
         data: &mut PutObjReader,
         opts: &ObjectOptions,
     ) -> Result<(ObjectInfo, Option<crate::disk::OldCurrentSize>)> {
-        let result = match self.handle_put_object(bucket, object, data, opts).await {
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        let options = prefix_guard.options(opts);
+        let result = match self.handle_put_object(bucket, object, data, &options).await {
             Ok((object_info, old_current_size)) => enqueue_transition_after_write(Ok(object_info), LcEventSrc::S3PutObject)
                 .await
                 .map(|object_info| (object_info, old_current_size)),
@@ -1268,8 +1272,10 @@ impl crate::storage_api_contracts::object::ObjectOperations for ECStore {
         src_opts: &ObjectOptions,
         dst_opts: &ObjectOptions,
     ) -> Result<ObjectInfo> {
+        let prefix_guard = self.admit_prefix_mutation(dst_bucket, dst_object).await?;
+        let guarded_options = prefix_guard.options(dst_opts);
         let result = enqueue_transition_after_write(
-            self.handle_copy_object(src_bucket, src_object, dst_bucket, dst_object, src_info, src_opts, dst_opts)
+            self.handle_copy_object(src_bucket, src_object, dst_bucket, dst_object, src_info, src_opts, &guarded_options)
                 .await,
             LcEventSrc::S3CopyObject,
         )
@@ -1282,6 +1288,7 @@ impl crate::storage_api_contracts::object::ObjectOperations for ECStore {
 
     #[instrument(skip(self))]
     async fn delete_object_version(&self, bucket: &str, object: &str, fi: &FileInfo, force_del_marker: bool) -> Result<()> {
+        let _prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
         let result = self.handle_delete_object_version(bucket, object, fi, force_del_marker).await;
         if result.is_ok() {
             list_objects::observe_list_objects_mutation(self, bucket).await;
@@ -1290,7 +1297,9 @@ impl crate::storage_api_contracts::object::ObjectOperations for ECStore {
     }
 
     #[instrument(skip(self))]
-    async fn delete_object(&self, bucket: &str, object: &str, opts: ObjectOptions) -> Result<ObjectInfo> {
+    async fn delete_object(&self, bucket: &str, object: &str, mut opts: ObjectOptions) -> Result<ObjectInfo> {
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        prefix_guard.add_to_options(&mut opts);
         let result = self.handle_delete_object(bucket, object, opts).await;
         if result.is_ok() {
             list_objects::observe_list_objects_mutation(self, bucket).await;
@@ -1303,8 +1312,17 @@ impl crate::storage_api_contracts::object::ObjectOperations for ECStore {
         &self,
         bucket: &str,
         objects: Vec<ObjectToDelete>,
-        opts: ObjectOptions,
+        mut opts: ObjectOptions,
     ) -> (Vec<DeletedObject>, Vec<Option<Error>>) {
+        let names: Vec<&str> = objects.iter().map(|object| object.object_name.as_str()).collect();
+        let prefix_guard = match self.admit_prefix_mutations(bucket, &names).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                let count = objects.len();
+                return (vec![DeletedObject::default(); count], vec![Some(error); count]);
+            }
+        };
+        prefix_guard.add_to_options(&mut opts);
         let result = self.handle_delete_objects(bucket, objects, opts).await;
         let success_count = result.1.iter().filter(|err| err.is_none()).count();
         if success_count > 0 {
@@ -1315,7 +1333,9 @@ impl crate::storage_api_contracts::object::ObjectOperations for ECStore {
 
     #[instrument(skip(self))]
     async fn put_object_metadata(&self, bucket: &str, object: &str, opts: &ObjectOptions) -> Result<ObjectInfo> {
-        self.handle_put_object_metadata(bucket, object, opts).await
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        self.handle_put_object_metadata(bucket, object, &prefix_guard.options(opts))
+            .await
     }
     #[instrument(skip(self))]
     async fn get_object_tags(&self, bucket: &str, object: &str, opts: &ObjectOptions) -> Result<String> {
@@ -1324,26 +1344,35 @@ impl crate::storage_api_contracts::object::ObjectOperations for ECStore {
 
     #[instrument(level = "debug", skip(self))]
     async fn put_object_tags(&self, bucket: &str, object: &str, tags: &str, opts: &ObjectOptions) -> Result<ObjectInfo> {
-        self.handle_put_object_tags(bucket, object, tags, opts).await
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        self.handle_put_object_tags(bucket, object, tags, &prefix_guard.options(opts))
+            .await
     }
 
     #[instrument(skip(self))]
     async fn delete_object_tags(&self, bucket: &str, object: &str, opts: &ObjectOptions) -> Result<ObjectInfo> {
-        self.handle_delete_object_tags(bucket, object, opts).await
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        self.handle_delete_object_tags(bucket, object, &prefix_guard.options(opts))
+            .await
     }
 
     #[instrument(skip(self))]
     async fn add_partial(&self, bucket: &str, object: &str, version_id: &str) -> Result<()> {
+        let _prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
         self.handle_add_partial(bucket, object, version_id).await
     }
     #[instrument(skip(self))]
     async fn transition_object(&self, bucket: &str, object: &str, opts: &ObjectOptions) -> Result<()> {
-        self.handle_transition_object(bucket, object, opts).await
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        self.handle_transition_object(bucket, object, &prefix_guard.options(opts))
+            .await
     }
 
     #[instrument(skip(self))]
     async fn restore_transitioned_object(self: Arc<Self>, bucket: &str, object: &str, opts: &ObjectOptions) -> Result<()> {
-        self.handle_restore_transitioned_object(bucket, object, opts).await
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        self.handle_restore_transitioned_object(bucket, object, &prefix_guard.options(opts))
+            .await
     }
 }
 
@@ -1451,7 +1480,9 @@ impl crate::storage_api_contracts::multipart::MultipartOperations for ECStore {
 
     #[instrument(skip(self))]
     async fn new_multipart_upload(&self, bucket: &str, object: &str, opts: &ObjectOptions) -> Result<MultipartUploadResult> {
-        self.handle_new_multipart_upload(bucket, object, opts).await
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        self.handle_new_multipart_upload(bucket, object, &prefix_guard.options(opts))
+            .await
     }
 
     #[instrument(skip(self))]
@@ -1469,6 +1500,7 @@ impl crate::storage_api_contracts::multipart::MultipartOperations for ECStore {
         _src_opts: &ObjectOptions,
         _dst_opts: &ObjectOptions,
     ) -> Result<()> {
+        let prefix_guard = self.admit_prefix_mutation(_dst_bucket, _dst_object).await?;
         self.handle_copy_object_part(
             src_bucket,
             src_object,
@@ -1480,7 +1512,7 @@ impl crate::storage_api_contracts::multipart::MultipartOperations for ECStore {
             _length,
             _src_info,
             _src_opts,
-            _dst_opts,
+            &prefix_guard.options(_dst_opts),
         )
         .await
     }
@@ -1494,7 +1526,8 @@ impl crate::storage_api_contracts::multipart::MultipartOperations for ECStore {
         data: &mut PutObjReader,
         opts: &ObjectOptions,
     ) -> Result<PartInfo> {
-        self.handle_put_object_part(bucket, object, upload_id, part_id, data, opts)
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        self.handle_put_object_part(bucket, object, upload_id, part_id, data, &prefix_guard.options(opts))
             .await
     }
 
@@ -1525,7 +1558,9 @@ impl crate::storage_api_contracts::multipart::MultipartOperations for ECStore {
 
     #[instrument(skip(self))]
     async fn abort_multipart_upload(&self, bucket: &str, object: &str, upload_id: &str, opts: &ObjectOptions) -> Result<()> {
-        self.handle_abort_multipart_upload(bucket, object, upload_id, opts).await
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
+        self.handle_abort_multipart_upload(bucket, object, upload_id, &prefix_guard.options(opts))
+            .await
     }
 
     #[instrument(skip(self))]
@@ -1537,9 +1572,10 @@ impl crate::storage_api_contracts::multipart::MultipartOperations for ECStore {
         uploaded_parts: Vec<CompletePart>,
         opts: &ObjectOptions,
     ) -> Result<ObjectInfo> {
+        let prefix_guard = self.admit_prefix_mutation(bucket, object).await?;
         let result = enqueue_transition_after_write(
             self.clone()
-                .handle_complete_multipart_upload(bucket, object, upload_id, uploaded_parts, opts)
+                .handle_complete_multipart_upload(bucket, object, upload_id, uploaded_parts, &prefix_guard.options(opts))
                 .await,
             LcEventSrc::S3CompleteMultipartUpload,
         )

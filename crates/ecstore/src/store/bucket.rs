@@ -914,7 +914,7 @@ mod tests {
         list::ListOperations as _,
         object::{ObjectIO as _, ObjectOperations as _},
     };
-    use crate::store::{ECStore, init_local_disks_with_instance_ctx};
+    use crate::store::{ClosedPrefixV1, ECStore, init_local_disks_with_instance_ctx};
     use crate::{
         disk::endpoint::Endpoint,
         layout::endpoints::{EndpointServerPools, Endpoints, PoolEndpoints},
@@ -2216,6 +2216,121 @@ mod tests {
             .expect("PUT task should join")
             .expect_err("PUT must not recreate an object in the deleted bucket");
         assert!(matches!(err, StorageError::BucketNotFound(name) if name == bucket));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn closed_prefix_rejects_ordinary_writes_and_allows_bound_delete() {
+        let (_, ecstore) = setup_bucket_delete_test_env().await;
+        let bucket = format!("closed-prefix-{}", Uuid::new_v4().simple());
+        let scope = format!(
+            "root/v1/databases/1234/5678/12345678-1234-1234-1234-123456789abc/epochs/1-{}/objects/",
+            Uuid::new_v4()
+        );
+        let key = format!("{scope}{}", "a".repeat(64));
+        ecstore
+            .make_bucket(&bucket, &MakeBucketOptions::default())
+            .await
+            .expect("bucket should be created");
+        ecstore
+            .put_object(&bucket, &key, &mut PutObjReader::from_vec(b"before".to_vec()), &ObjectOptions::default())
+            .await
+            .expect("ordinary PUT should succeed before closure");
+
+        let closed = ClosedPrefixV1 {
+            bucket: bucket.clone(),
+            prefix: scope,
+            operation: Uuid::new_v4(),
+            context_sha256: [7; 32],
+        };
+        let proof = Box::pin(ecstore.close_prefix(closed.clone()))
+            .await
+            .expect("close should complete");
+        assert_eq!(proof.closed, closed);
+        assert_eq!(proof.provider_deployment, ecstore.id);
+        assert_eq!(
+            Box::pin(ecstore.close_prefix(closed.clone()))
+                .await
+                .expect("retry should be idempotent"),
+            proof
+        );
+        let mut conflicting = closed.clone();
+        conflicting.operation = Uuid::new_v4();
+        assert!(matches!(
+            Box::pin(ecstore.close_prefix(conflicting)).await,
+            Err(StorageError::PreconditionFailed)
+        ));
+        let put = ecstore
+            .put_object(&bucket, &key, &mut PutObjReader::from_vec(b"after".to_vec()), &ObjectOptions::default())
+            .await;
+        assert!(matches!(put, Err(StorageError::PreconditionFailed)));
+        let delete = ecstore.delete_object(&bucket, &key, ObjectOptions::default()).await;
+        assert!(matches!(delete, Err(StorageError::PreconditionFailed)));
+        assert!(
+            ecstore
+                .get_object_info(&bucket, &key, &ObjectOptions::default())
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            Box::pin(ecstore.delete_closed_prefix_objects(&proof, &[format!("{}{}", closed.prefix, "g".repeat(64))])).await,
+            Err(StorageError::PreconditionFailed)
+        ));
+        let mut wrong_provider = proof.clone();
+        wrong_provider.provider_deployment = Uuid::new_v4();
+        assert!(matches!(
+            Box::pin(ecstore.delete_closed_prefix_objects(&wrong_provider, &[key.clone()])).await,
+            Err(StorageError::PreconditionFailed)
+        ));
+
+        Box::pin(ecstore.delete_closed_prefix_objects(&proof, &[key.clone()]))
+            .await
+            .expect("bound delete should remove the object");
+        Box::pin(ecstore.delete_closed_prefix_objects(&proof, &[key.clone()]))
+            .await
+            .expect("replayed bound delete should be idempotent");
+        assert!(
+            ecstore
+                .get_object_info(&bucket, &key, &ObjectOptions::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn closed_prefix_waits_for_admitted_mutation() {
+        let (_, ecstore) = setup_bucket_delete_test_env().await;
+        let bucket = format!("closed-prefix-drain-{}", Uuid::new_v4().simple());
+        let scope = format!(
+            "root/v1/databases/1234/5678/12345678-1234-1234-1234-123456789abc/epochs/2-{}/objects/",
+            Uuid::new_v4()
+        );
+        ecstore
+            .make_bucket(&bucket, &MakeBucketOptions::default())
+            .await
+            .expect("bucket should be created");
+        let guard = ecstore
+            .admit_prefix_mutation(&bucket, &format!("{scope}{}", "a".repeat(64)))
+            .await
+            .expect("mutation should be admitted before closure");
+        let close_store = ecstore.clone();
+        let closed = ClosedPrefixV1 {
+            bucket,
+            prefix: scope,
+            operation: Uuid::new_v4(),
+            context_sha256: [8; 32],
+        };
+        let mut close = tokio::spawn(async move { close_store.close_prefix(closed).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut close).await.is_err(),
+            "close must wait for admitted mutation"
+        );
+        drop(guard);
+        close
+            .await
+            .expect("close task should join")
+            .expect("close should complete after mutation drains");
     }
 
     #[tokio::test]

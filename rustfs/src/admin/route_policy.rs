@@ -21,6 +21,8 @@ const ALL_ADMIN: AdminActionRef = AdminActionRef::new("AllAdminActions");
 const ADD_USER_TO_GROUP: AdminActionRef = AdminActionRef::new("AddUserToGroupAdminAction");
 const ATTACH_POLICY: AdminActionRef = AdminActionRef::new("AttachPolicyAdminAction");
 const CONFIG_UPDATE: AdminActionRef = AdminActionRef::new("ConfigUpdateAdminAction");
+const CLOSE_PREFIX: AdminActionRef = AdminActionRef::new("TokolosheClosePrefixAction");
+const DELETE_CLOSED_OBJECTS: AdminActionRef = AdminActionRef::new("TokolosheDeleteClosedObjectsAction");
 const CONSOLE_LOG: AdminActionRef = AdminActionRef::new("ConsoleLogAdminAction");
 const COMMIT_TABLE: AdminActionRef = AdminActionRef::new("CommitTableAction");
 const CREATE_POLICY: AdminActionRef = AdminActionRef::new("CreatePolicyAdminAction");
@@ -388,6 +390,18 @@ pub const ADMIN_ROUTE_POLICY_SPECS: &[AdminRouteSpec] = &[
         HttpMethod::Delete,
         "/rustfs/admin/v3/bucket-durability/{bucket}",
         CONFIG_UPDATE,
+        RouteRiskLevel::High,
+    ),
+    admin(
+        HttpMethod::Post,
+        "/rustfs/admin/v3/tokoloshe/closed-prefix",
+        CLOSE_PREFIX,
+        RouteRiskLevel::High,
+    ),
+    admin(
+        HttpMethod::Post,
+        "/rustfs/admin/v3/tokoloshe/closed-prefix/delete",
+        DELETE_CLOSED_OBJECTS,
         RouteRiskLevel::High,
     ),
     admin(
