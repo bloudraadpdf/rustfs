@@ -902,7 +902,7 @@ mod tests {
         scan_metadata_less_residue_with_budget, scanner_bucket_list_set_concurrency, should_override_created_from_metadata,
         validate_table_bucket_delete_allowed,
     };
-    use crate::bucket::metadata::table_bucket_catalog_metadata_prefix;
+    use crate::bucket::metadata::{BUCKET_VERSIONING_CONFIG, table_bucket_catalog_metadata_prefix};
     use crate::bucket::metadata_sys;
     use crate::cluster::rpc::peer_s3_client::install_delete_bucket_empty_scan_barrier;
     use crate::disk::{BUCKET_META_PREFIX, RUSTFS_META_BUCKET, STORAGE_FORMAT_FILE};
