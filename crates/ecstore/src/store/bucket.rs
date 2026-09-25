@@ -2337,6 +2337,85 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn closed_prefix_refuses_versioned_bucket_and_preserves_objects() {
+        let _floor = crate::disk::local::durability_mode_override::set_closed_prefix_strict();
+        let (_, ecstore) = setup_bucket_delete_test_env().await;
+        let bucket = format!("closed-prefix-versioning-{}", Uuid::new_v4().simple());
+        let scope = format!(
+            "root/v1/databases/1234/5678/12345678-1234-1234-1234-123456789abc/epochs/3-{}/objects/",
+            Uuid::new_v4()
+        );
+        let key = format!("{scope}{}", "a".repeat(64));
+        ecstore
+            .make_bucket(&bucket, &MakeBucketOptions::default())
+            .await
+            .expect("bucket should be created");
+        ecstore
+            .put_object(
+                &bucket,
+                &key,
+                &mut PutObjReader::from_vec(b"retained".to_vec()),
+                &ObjectOptions::default(),
+            )
+            .await
+            .expect("object should be created");
+        let closed = ClosedPrefixV1 {
+            bucket: bucket.clone(),
+            prefix: scope,
+            operation: Uuid::new_v4(),
+            context_sha256: [9; 32],
+        };
+        let versioning = br#"<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>"#.to_vec();
+        ecstore
+            .update_bucket_metadata_config(&bucket, BUCKET_VERSIONING_CONFIG, versioning.clone())
+            .await
+            .expect("versioning should be enabled");
+        assert!(matches!(
+            Box::pin(ecstore.close_prefix(closed.clone())).await,
+            Err(StorageError::PreconditionFailed)
+        ));
+
+        let other_bucket = format!("closed-prefix-later-versioning-{}", Uuid::new_v4().simple());
+        ecstore
+            .make_bucket(&other_bucket, &MakeBucketOptions::default())
+            .await
+            .expect("other bucket should be created");
+        let other_key = key.clone();
+        ecstore
+            .put_object(
+                &other_bucket,
+                &other_key,
+                &mut PutObjReader::from_vec(b"retained".to_vec()),
+                &ObjectOptions::default(),
+            )
+            .await
+            .expect("other object should be created");
+        let other_closed = ClosedPrefixV1 {
+            bucket: other_bucket.clone(),
+            ..closed
+        };
+        let proof = Box::pin(ecstore.close_prefix(other_closed))
+            .await
+            .expect("unversioned bucket should close");
+        ecstore
+            .update_bucket_metadata_config(&other_bucket, BUCKET_VERSIONING_CONFIG, versioning)
+            .await
+            .expect("versioning should be enabled after close");
+        assert!(matches!(
+            Box::pin(ecstore.delete_closed_prefix_objects(&proof, &[other_key.clone()])).await,
+            Err(StorageError::PreconditionFailed)
+        ));
+        assert!(
+            ecstore
+                .get_object_info(&other_bucket, &other_key, &ObjectOptions::default())
+                .await
+                .is_ok(),
+            "refused control delete must preserve the object"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn bucket_recreation_does_not_publish_unverified_usage() {
         let (_, ecstore) = setup_bucket_delete_test_env().await;
         let bucket = format!("bucket-usage-generation-{}", Uuid::new_v4().simple());

@@ -6,6 +6,7 @@ use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
 
 use super::ECStore;
+use crate::bucket::metadata_sys;
 use crate::config::com::save_config_with_opts;
 use crate::disk::RUSTFS_META_BUCKET;
 use crate::disk::local::{DurabilityMode, closed_prefix_strict_durability, durability_mode};
@@ -116,6 +117,7 @@ impl ECStore {
         let guard = lock.get_write_lock(get_lock_acquire_timeout()).await?;
         // Ordinary mutations acquire prefix before bucket lifecycle.
         let bucket_guard = self.acquire_bucket_lifecycle_write_lock(&requested.bucket).await?;
+        self.require_never_versioned_bucket(&requested.bucket).await?;
         if self.ctx.is_dist_erasure().await {
             prove_closed_prefix_fleet().await?;
         }
@@ -180,11 +182,14 @@ impl ECStore {
             .get_read_lock(get_lock_acquire_timeout())
             .await?;
         let bucket_guard = self.acquire_bucket_lifecycle_read_lock(&closed.bucket).await?;
+        let metadata_guard = metadata_sys::acquire_bucket_metadata_transaction_read_lock_in(&self.ctx, &closed.bucket).await?;
+        self.require_never_versioned_bucket(&closed.bucket).await?;
         if self.read_prefix_marker(&closed.bucket, &closed.prefix).await? != Some(proof.clone())
             || proof.provider_deployment != self.id
             || proof.bucket_incarnation != self.bucket_incarnation_id_from_disk(&closed.bucket).await?
             || guard.is_lock_lost()
             || bucket_guard.is_lock_lost()
+            || metadata_guard.is_lock_lost()
         {
             return Err(Error::PreconditionFailed);
         }
@@ -192,7 +197,7 @@ impl ECStore {
         options.add_namespace_lock_guard(&guard);
         options.add_bucket_lifecycle_lock_guard(&bucket_guard);
         for key in keys {
-            if guard.is_lock_lost() || bucket_guard.is_lock_lost() {
+            if guard.is_lock_lost() || bucket_guard.is_lock_lost() || metadata_guard.is_lock_lost() {
                 return Err(Error::PreconditionFailed);
             }
             match self.handle_delete_object(&closed.bucket, key, options.clone()).await {
@@ -201,7 +206,15 @@ impl ECStore {
             }
             super::list_objects::observe_list_objects_mutation(self, &closed.bucket).await;
         }
-        if guard.is_lock_lost() || bucket_guard.is_lock_lost() {
+        if guard.is_lock_lost() || bucket_guard.is_lock_lost() || metadata_guard.is_lock_lost() {
+            return Err(Error::PreconditionFailed);
+        }
+        Ok(())
+    }
+
+    async fn require_never_versioned_bucket(&self, bucket: &str) -> Result<()> {
+        let (metadata, persisted) = metadata_sys::get_config_from_disk_with_presence_in(&self.ctx, bucket).await?;
+        if !persisted || metadata.versioning_config.is_some() || !metadata.versioning_config_xml.is_empty() {
             return Err(Error::PreconditionFailed);
         }
         Ok(())
