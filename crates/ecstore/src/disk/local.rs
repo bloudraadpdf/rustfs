@@ -1089,6 +1089,7 @@ const DEFAULT_RUSTFS_DRIVE_SYNC_ENABLE: bool = true;
 /// Durability tier for object data-path writes: `strict` (default) | `relaxed` | `none`.
 /// See docs/operations/durability-modes.md for the power-loss guarantee matrix.
 const ENV_RUSTFS_DURABILITY_MODE: &str = "RUSTFS_DURABILITY_MODE";
+const ENV_RUSTFS_CLOSED_PREFIX_STRICT_DURABILITY: &str = "RUSTFS_CLOSED_PREFIX_STRICT_DURABILITY";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalReadCopyMethod {
@@ -1314,6 +1315,15 @@ pub(crate) fn durability_mode() -> DurabilityMode {
     })
 }
 
+pub(crate) fn closed_prefix_strict_durability() -> bool {
+    #[cfg(test)]
+    if durability_mode_override::closed_prefix_strict() {
+        return true;
+    }
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| rustfs_utils::get_env_bool(ENV_RUSTFS_CLOSED_PREFIX_STRICT_DURABILITY, false))
+}
+
 /// Test-only override for [`durability_mode`].
 ///
 /// The production value is resolved from the environment once per process, so
@@ -1323,13 +1333,19 @@ pub(crate) fn durability_mode() -> DurabilityMode {
 #[cfg(test)]
 pub(crate) mod durability_mode_override {
     use super::DurabilityMode;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
     static OVERRIDE: RwLock<Option<DurabilityMode>> = RwLock::new(None);
+    static CLOSED_PREFIX_STRICT: AtomicBool = AtomicBool::new(false);
     static SERIAL: Mutex<()> = Mutex::new(());
 
     pub(crate) fn get() -> Option<DurabilityMode> {
         *OVERRIDE.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn closed_prefix_strict() -> bool {
+        CLOSED_PREFIX_STRICT.load(Ordering::Acquire)
     }
 
     /// Holds the override (and the serialization lock) until dropped.
@@ -1340,12 +1356,20 @@ pub(crate) mod durability_mode_override {
     impl Drop for OverrideGuard {
         fn drop(&mut self) {
             *OVERRIDE.write().unwrap_or_else(PoisonError::into_inner) = None;
+            CLOSED_PREFIX_STRICT.store(false, Ordering::Release);
         }
     }
 
     pub(crate) fn set(mode: DurabilityMode) -> OverrideGuard {
         let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         *OVERRIDE.write().unwrap_or_else(PoisonError::into_inner) = Some(mode);
+        OverrideGuard { _serial: serial }
+    }
+
+    pub(crate) fn set_closed_prefix_strict() -> OverrideGuard {
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        *OVERRIDE.write().unwrap_or_else(PoisonError::into_inner) = Some(DurabilityMode::Strict);
+        CLOSED_PREFIX_STRICT.store(true, Ordering::Release);
         OverrideGuard { _serial: serial }
     }
 }
@@ -1482,6 +1506,9 @@ pub(crate) fn effective_durability(volume: &str) -> DurabilityMode {
     let global = durability_mode();
     if global == DurabilityMode::LegacyOff {
         return global;
+    }
+    if global == DurabilityMode::Strict && closed_prefix_strict_durability() {
+        return DurabilityMode::Strict;
     }
     if is_system_critical_volume(volume) {
         return DurabilityMode::Strict;
@@ -14571,6 +14598,13 @@ mod test {
             assert_eq!(effective_durability("hp5b-override-strict"), DurabilityMode::Strict);
             assert_eq!(effective_durability("hp5b-other-bucket"), DurabilityMode::Relaxed);
         }
+    }
+
+    #[test]
+    fn test_closed_prefix_strict_floor_overrides_relaxed_bucket() {
+        let _floor = durability_mode_override::set_closed_prefix_strict();
+        let _bucket = BucketOverrideGuard::set("closed-prefix-floor-bucket", DurabilityMode::Relaxed);
+        assert_eq!(effective_durability("closed-prefix-floor-bucket"), DurabilityMode::Strict);
     }
 
     #[test]

@@ -389,6 +389,9 @@ debug = 0
 strip = "symbols"
 split-debuginfo = "off"
 
+[profile.release.package.rustfs-ecstore]
+codegen-units = 4
+
 [profile.production]
 inherits = "release"
 

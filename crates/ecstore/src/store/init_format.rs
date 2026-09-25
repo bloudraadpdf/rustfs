@@ -687,7 +687,7 @@ fn check_format_erasure_value(format: &FormatV3) -> Result<()> {
         return Err(Error::other("invalid deployment ID"));
     }
 
-    if format.erasure.version != FormatErasureVersion::V3 {
+    if !matches!(format.erasure.version, FormatErasureVersion::V3 | FormatErasureVersion::V4) {
         return Err(Error::other("invalid FormatErasureVersion"));
     }
     Ok(())

@@ -989,7 +989,9 @@ impl heal_control_service_server::HealControlService for HealControlRpcService {
                     .map_err(|_| Status::internal("remote version state capability length cannot be represented"))?
             } else {
                 rustfs_protos::encode_cross_pool_fence_capability(
-                    CROSS_POOL_FENCE_SUPPORTED_VERSION,
+                    runtime_sources::current_object_store_handle()
+                        .map(|store| store.closed_prefix_capability_version())
+                        .unwrap_or(CROSS_POOL_FENCE_SUPPORTED_VERSION),
                     &topology_member,
                     NODE_CAPABILITY_SERVER_EPOCH.as_bytes(),
                 )

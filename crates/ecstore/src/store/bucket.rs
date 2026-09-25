@@ -2221,6 +2221,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn closed_prefix_rejects_ordinary_writes_and_allows_bound_delete() {
+        let _floor = crate::disk::local::durability_mode_override::set_closed_prefix_strict();
         let (_, ecstore) = setup_bucket_delete_test_env().await;
         let bucket = format!("closed-prefix-{}", Uuid::new_v4().simple());
         let scope = format!(
@@ -2300,6 +2301,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn closed_prefix_waits_for_admitted_mutation() {
+        let _floor = crate::disk::local::durability_mode_override::set_closed_prefix_strict();
         let (_, ecstore) = setup_bucket_delete_test_env().await;
         let bucket = format!("closed-prefix-drain-{}", Uuid::new_v4().simple());
         let scope = format!(

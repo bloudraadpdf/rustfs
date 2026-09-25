@@ -19,6 +19,9 @@ RUSTFS_DRIVE_SYNC_ENABLE=true|false          # default: true
 
 # Tier seeded into a NEWLY CREATED bucket's own override (see "New-bucket default")
 RUSTFS_NEW_BUCKET_DURABILITY_MODE=relaxed|strict|none|inherit   # default: relaxed
+
+# Required on every node that issues Tokoloshe closed-prefix receipts
+RUSTFS_CLOSED_PREFIX_STRICT_DURABILITY=true                    # default: false
 ```
 
 Resolution rules:
@@ -36,6 +39,11 @@ Values are case-insensitive and whitespace-tolerant. The mode is resolved
 old switch performed a dozen times per PUT); changing the environment
 requires a restart. The resolved mode is logged at startup under the
 `disk_local_durability_mode` event.
+
+Closed-prefix mode requires `RUSTFS_DURABILITY_MODE=strict`. When both settings
+are enabled, strict durability overrides every bucket setting, including the
+relaxed default for new buckets. A node without this floor does not advertise
+closed-prefix capability. Changing either setting requires a restart.
 
 `legacy-off` is not a value of `RUSTFS_DURABILITY_MODE`; it is only reachable
 through `RUSTFS_DRIVE_SYNC_ENABLE=false` so that existing deployments keep

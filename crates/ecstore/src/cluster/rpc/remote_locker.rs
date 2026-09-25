@@ -207,6 +207,12 @@ impl RemoteClient {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(err)) => {
                 let reason = err.to_string();
+                if err.code() == tonic::Code::Unauthenticated
+                    && op != "ping"
+                    && let Ok(mut client) = self.get_client().await
+                {
+                    let _ = timeout(Self::online_check_timeout(), client.ping(Request::new(Self::build_ping_request()))).await;
+                }
                 // Only evict (and re-dial) the cached channel when the failure is a genuine
                 // transport problem. A server-produced application status (auth denied, peer
                 // lock service not ready, invalid args, ...) arrives on a perfectly healthy

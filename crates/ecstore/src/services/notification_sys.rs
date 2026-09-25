@@ -57,6 +57,25 @@ const REMOTE_VERSION_STATE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_VERSION_STATE_PROOF_TTL: Duration = Duration::from_secs(30);
 const CROSS_POOL_FENCE_SUPPORTED_VERSION: u32 = 2;
 const TIER_DELETE_JOURNAL_POLICY_SUPPORTED_VERSION: u32 = 3;
+const CLOSED_PREFIX_SUPPORTED_VERSION: u32 = 4;
+
+pub(crate) async fn prove_closed_prefix_fleet() -> Result<()> {
+    let topology = REMOTE_VERSION_STATE_PROBE_TOPOLOGY
+        .get()
+        .ok_or_else(|| Error::other("closed-prefix fleet topology is unavailable"))?;
+    let notification_sys =
+        runtime_sources::notification_sys().ok_or_else(|| Error::other("closed-prefix fleet probe is unavailable"))?;
+    let (_, minimum_version) = timeout(
+        REMOTE_VERSION_STATE_PROBE_TIMEOUT,
+        notification_sys.probe_cross_pool_fence_fleet(topology, true),
+    )
+    .await
+    .map_err(|_| Error::other("closed-prefix fleet probe timed out"))??;
+    if minimum_version < CLOSED_PREFIX_SUPPORTED_VERSION {
+        return Err(Error::other("closed-prefix fleet capability is unsupported"));
+    }
+    Ok(())
+}
 type CrossPoolFencePolicyResult = Result<BTreeMap<String, Uuid>>;
 
 fn cross_pool_fence_policy_results(
@@ -678,7 +697,7 @@ pub fn start_remote_version_state_fleet_probe(topology_fingerprint: String) {
             let fence_probe = match get_global_notification_sys() {
                 Some(notification_sys) => timeout(
                     REMOTE_VERSION_STATE_PROBE_TIMEOUT,
-                    notification_sys.probe_cross_pool_fence_fleet(&topology_fingerprint),
+                    notification_sys.probe_cross_pool_fence_fleet(&topology_fingerprint, false),
                 )
                 .await
                 .unwrap_or_else(|_| Err(Error::other("cross-pool fence fleet capability probe timed out"))),
@@ -811,7 +830,11 @@ impl NotificationSys {
         Ok(peer_epochs)
     }
 
-    async fn probe_cross_pool_fence_fleet(&self, topology_fingerprint: &str) -> Result<(BTreeMap<String, Uuid>, u32)> {
+    async fn probe_cross_pool_fence_fleet(
+        &self,
+        topology_fingerprint: &str,
+        retry_network_failure: bool,
+    ) -> Result<(BTreeMap<String, Uuid>, u32)> {
         if self.peer_clients.len() != self.peer_topology_hosts.len() {
             return Err(Error::other("cross-pool fence capability fleet membership is incomplete"));
         }
@@ -819,7 +842,13 @@ impl NotificationSys {
             let client = client
                 .as_ref()
                 .ok_or_else(|| Error::other("cross-pool fence capability peer is unreachable"))?;
-            client.probe_cross_pool_fence(topology_fingerprint.to_string()).await
+            let result = client.probe_cross_pool_fence(topology_fingerprint.to_string()).await;
+            if retry_network_failure && result.as_ref().err().is_some_and(PeerRestClient::is_network_like_error) {
+                client.prepare_retry().await;
+                client.probe_cross_pool_fence(topology_fingerprint.to_string()).await
+            } else {
+                result
+            }
         });
         let mut peer_epochs = BTreeMap::new();
         let mut minimum_version = u32::MAX;

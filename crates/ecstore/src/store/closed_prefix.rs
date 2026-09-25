@@ -8,8 +8,11 @@ use uuid::Uuid;
 use super::ECStore;
 use crate::config::com::save_config_with_opts;
 use crate::disk::RUSTFS_META_BUCKET;
+use crate::disk::local::{DurabilityMode, closed_prefix_strict_durability, durability_mode};
 use crate::error::{Error, Result};
+use crate::layout::format::FormatErasureVersion;
 use crate::object_api::ObjectOptions;
+use crate::services::notification_sys::prove_closed_prefix_fleet;
 use crate::set_disk::get_lock_acquire_timeout;
 use crate::storage_api_contracts::namespace::NamespaceLocking as _;
 use crate::storage_api_contracts::object::HTTPPreconditions;
@@ -56,6 +59,21 @@ impl PrefixMutationGuard {
 }
 
 impl ECStore {
+    pub fn closed_prefix_capability_version(&self) -> u32 {
+        if durability_mode() == DurabilityMode::Strict
+            && closed_prefix_strict_durability()
+            && !self.pools.is_empty()
+            && self
+                .pools
+                .iter()
+                .all(|pool| pool.format.erasure.version == FormatErasureVersion::V4)
+        {
+            4
+        } else {
+            3
+        }
+    }
+
     pub(crate) async fn admit_prefix_mutation(&self, bucket: &str, object: &str) -> Result<PrefixMutationGuard> {
         self.admit_prefix_mutations(bucket, &[object]).await
     }
@@ -91,10 +109,16 @@ impl ECStore {
         {
             return Err(Error::PreconditionFailed);
         }
+        if self.closed_prefix_capability_version() != 4 {
+            return Err(Error::PreconditionFailed);
+        }
         let lock = self.prefix_lock(&requested.bucket, &requested.prefix).await?;
         let guard = lock.get_write_lock(get_lock_acquire_timeout()).await?;
         // Ordinary mutations acquire prefix before bucket lifecycle.
         let bucket_guard = self.acquire_bucket_lifecycle_write_lock(&requested.bucket).await?;
+        if self.ctx.is_dist_erasure().await {
+            prove_closed_prefix_fleet().await?;
+        }
         let proof = ClosedPrefixProofV1 {
             provider_deployment: self.id,
             bucket_incarnation: self.bucket_incarnation_id_from_disk(&requested.bucket).await?,

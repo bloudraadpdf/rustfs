@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(test)]
-use crate::cluster::rpc::http_auth::RPC_REPLAY_SCOPE_VERSION_HEADER;
 use crate::cluster::rpc::http_auth::{
     AuthenticatedPeerReplayCapabilities, RPC_AUTH_VERSION_HEADER, RPC_AUTH_VERSION_V2, RPC_BOOT_EPOCH_CHALLENGE_HEADER,
     RPC_CONTENT_SHA256_HEADER, RPC_REPLAY_CACHE_CAPABILITY_HEADER, RPC_REPLAY_CACHE_CAPABILITY_PROOF_HEADER,
     RollingMutationBodyDigest, TIMESTAMP_HEADER, internode_rpc_body_digest_strict,
     verify_tonic_peer_replay_capabilities_response,
 };
+#[cfg(test)]
+use crate::cluster::rpc::http_auth::{RPC_BOOT_EPOCH_HEADER, RPC_REPLAY_SCOPE_VERSION_HEADER};
 use crate::cluster::rpc::{gen_tonic_replay_scope_headers, gen_tonic_signature_headers, normalize_tonic_rpc_audience};
 #[cfg(test)]
 use crate::cluster::rpc::{tonic_boot_epoch_challenge, tonic_boot_epoch_response_headers};
@@ -366,7 +366,8 @@ where
                     .headers()
                     .get(RPC_CONTENT_SHA256_HEADER)
                     .and_then(|value| value.to_str().ok()),
-            ) {
+            ) && request.uri().path() != "/node_service.NodeService/Ping"
+            {
                 match gen_tonic_replay_scope_headers(audience, request.uri().path(), timestamp, content_sha256, boot_epoch) {
                     Ok(headers) => request.headers_mut().extend(headers),
                     Err(error) => debug!(error = %error, "could not attach replay-scoped RPC signature"),
@@ -995,6 +996,44 @@ mod tests {
             headers[1].contains_key(RPC_REPLAY_SCOPE_VERSION_HEADER),
             "authenticated legacy boot proof must enable v3 on a non-Ping request"
         );
+    }
+
+    #[test]
+    fn ping_relearns_restarted_peer_epoch_without_downgrading_mutations() {
+        ensure_test_rpc_secret();
+        let audience = "restarted-peer-client-test:9000";
+        let old_epoch = Uuid::new_v4();
+        clear_peer_capability(audience);
+        apply_peer_replay_response(
+            audience.to_string(),
+            PeerReplayState::default(),
+            Ok(authenticated_peer_response(old_epoch, true)),
+        );
+        let seen_headers = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let service = EpochProofService {
+            audience: audience.to_string(),
+            include_capability: true,
+            seen_headers: seen_headers.clone(),
+        };
+        let mut channel = ReplayScopeChannel::new(service, Some(audience.to_string()));
+
+        futures::executor::block_on(channel.call(replay_scope_request(audience, "Ping")))
+            .expect("authenticated Ping must complete");
+        let new_epoch = peer_replay_state(audience)
+            .boot_epoch
+            .expect("authenticated proof must supply epoch");
+        assert_ne!(new_epoch, old_epoch);
+        futures::executor::block_on(channel.call(replay_scope_request(audience, "Lock")))
+            .expect("mutation must complete after epoch refresh");
+
+        let headers = seen_headers.lock().expect("test header capture lock must not be poisoned");
+        assert!(!headers[0].contains_key(RPC_REPLAY_SCOPE_VERSION_HEADER));
+        let expected_epoch = new_epoch.to_string();
+        assert_eq!(
+            headers[1].get(RPC_BOOT_EPOCH_HEADER).and_then(|value| value.to_str().ok()),
+            Some(expected_epoch.as_str())
+        );
+        clear_peer_capability(audience);
     }
 
     #[test]

@@ -38,13 +38,7 @@ pub enum FormatBackend {
     Unknown,
 }
 
-/// Represents the V3 backend disk structure version
-/// under `.rustfs.sys` and actual data namespace.
-///
-/// FormatErasureV3 - structure holds format config version '3'.
-///
-/// The V3 format to support "large bucket" support where a bucket
-/// can span multiple erasure sets.
+/// Shared V3/V4 erasure layout; V4 changes admission, not fields.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FormatErasureV3 {
     /// Version of 'xl' format.
@@ -72,6 +66,9 @@ pub enum FormatErasureVersion {
     V2,
     #[serde(rename = "3")]
     V3,
+    /// V3 layout; older binaries reject this version before serving writes.
+    #[serde(rename = "4")]
+    V4,
 
     #[serde(other)]
     Unknown,
@@ -156,7 +153,7 @@ impl FormatV3 {
         };
 
         let erasure = FormatErasureV3 {
-            version: FormatErasureVersion::V3,
+            version: FormatErasureVersion::V4,
             this: Uuid::nil(),
             sets: (0..num_sets)
                 .map(|_| (0..set_len).map(|_| Uuid::new_v4()).collect())
@@ -290,7 +287,7 @@ mod test {
 
         assert_eq!(format.version, FormatMetaVersion::V1);
         assert_eq!(format.format, FormatBackend::ErasureSingle);
-        assert_eq!(format.erasure.version, FormatErasureVersion::V3);
+        assert_eq!(format.erasure.version, FormatErasureVersion::V4);
         assert_eq!(format.erasure.sets.len(), 1);
         assert_eq!(format.erasure.sets[0].len(), 1);
         assert_eq!(format.erasure.distribution_algo, DistributionAlgoVersion::V3);
@@ -303,7 +300,7 @@ mod test {
 
         assert_eq!(format.version, FormatMetaVersion::V1);
         assert_eq!(format.format, FormatBackend::Erasure);
-        assert_eq!(format.erasure.version, FormatErasureVersion::V3);
+        assert_eq!(format.erasure.version, FormatErasureVersion::V4);
         assert_eq!(format.erasure.sets.len(), 2);
         assert_eq!(format.erasure.sets[0].len(), 4);
         assert_eq!(format.erasure.sets[1].len(), 4);
@@ -539,6 +536,10 @@ mod test {
         let v3 = FormatErasureVersion::V3;
         let json = serde_json::to_string(&v3).unwrap();
         assert_eq!(json, "\"3\"");
+
+        let v4 = FormatErasureVersion::V4;
+        let json = serde_json::to_string(&v4).unwrap();
+        assert_eq!(json, "\"4\"");
     }
 
     #[test]
